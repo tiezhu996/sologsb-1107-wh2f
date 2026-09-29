@@ -55,7 +55,7 @@ export function RulerInput({
         }}
         helperText={helperText}
       />
-      {!helperText && (
+      {helperText === undefined && (
         <Typography variant="caption" color="text.secondary">
           刻度以 1 mm 为基准，可输入小数
         </Typography>

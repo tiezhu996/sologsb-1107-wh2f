@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Alert, Box, Button, Card, CardContent, Chip, Divider, Grid, Stack, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, TextField, Typography } from '@mui/material'
+import { Alert, Box, Button, Card, CardContent, Chip, Dialog, DialogActions, DialogContent, DialogTitle, Grid, Snackbar, Stack, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, TextField, Typography } from '@mui/material'
 import { GrainStripePreview } from '../components/common/GrainStripePreview'
 import { RulerInput } from '../components/common/RulerInput'
 import { useMouldFilter } from '../hooks/useMouldFilter'
 import { useUnitConvert } from '../hooks/useUnitConvert'
 import { useMouldStore } from '../stores/mouldStore'
 import { useRunStore } from '../stores/runStore'
+import type { Mould } from '../types/mould'
 import { MOULD_STATES, WIRE_MATERIALS, type MouldInput, type MouldStateValue, type WireMaterial } from '../types/mould'
-import { calculateMeshDensity } from '../utils/stripe'
+import { calculateDeviation, calculateMeshDensity, getGapConclusion, isGapOutOfTolerance } from '../utils/stripe'
 
 const emptyMouldForm: MouldInput = {
   mouldNo: '',
@@ -21,17 +22,28 @@ const emptyMouldForm: MouldInput = {
   state: '在用',
 }
 
+function todayIso(): string {
+  return new Date().toISOString().slice(0, 10)
+}
+
 export default function MouldLedger() {
   const moulds = useMouldStore((state) => state.moulds)
   const error = useMouldStore((state) => state.error)
   const loadMoulds = useMouldStore((state) => state.loadMoulds)
   const addMould = useMouldStore((state) => state.addMould)
   const setMouldState = useMouldStore((state) => state.setMouldState)
+  const completeRepair = useMouldStore((state) => state.completeRepair)
   const runs = useRunStore((state) => state.sheetRuns)
   const loadRuns = useRunStore((state) => state.loadRuns)
   const [showForm, setShowForm] = useState(false)
   const [form, setForm] = useState<MouldInput>(emptyMouldForm)
   const [submitting, setSubmitting] = useState(false)
+  const [repairTarget, setRepairTarget] = useState<Mould | null>(null)
+  const [repairDate, setRepairDate] = useState(todayIso())
+  const [repairGap, setRepairGap] = useState(0)
+  const [repairReason, setRepairReason] = useState('')
+  const [repairSaving, setRepairSaving] = useState(false)
+  const [notice, setNotice] = useState<{ severity: 'success' | 'warning'; text: string } | null>(null)
   const { mmPitchToThreadsPerCm } = useUnitConvert()
   const {
     mouldNo,
@@ -54,6 +66,10 @@ export default function MouldLedger() {
     [form.stripeGap, form.wireDiameter],
   )
 
+  const repairDeviation = repairTarget ? calculateDeviation(repairGap, repairTarget.stripeGap) : 0
+  const repairExceeded = isGapOutOfTolerance(repairDeviation)
+  const repairBlocked = repairExceeded && !repairReason.trim()
+
   const updateForm = <K extends keyof MouldInput,>(key: K, value: MouldInput[K]) => {
     setForm((current) => {
       const next = { ...current, [key]: value }
@@ -73,12 +89,41 @@ export default function MouldLedger() {
     }
   }
 
+  const openRepairDialog = (mould: Mould) => {
+    setRepairTarget(mould)
+    setRepairDate(todayIso())
+    setRepairGap(mould.stripeGap)
+    setRepairReason('')
+  }
+
+  const handleRepairSubmit = async () => {
+    if (!repairTarget?.id) return
+    setRepairSaving(true)
+    const result = await completeRepair(repairTarget.id, {
+      repairDate,
+      measuredGap: repairGap,
+      failReason: repairReason,
+    })
+    setRepairSaving(false)
+    if (result.ok) {
+      const targetNo = repairTarget.mouldNo
+      setRepairTarget(null)
+      if (result.passed) {
+        setNotice({ severity: 'success', text: `${targetNo} 实测间距在 ±0.2 mm 内，已转为在用，可重新投入抄纸。` })
+      } else {
+        setNotice({ severity: 'warning', text: `${targetNo} 实测间距超差，已留在待修补状态并记录原因。` })
+      }
+    } else if (result.error) {
+      setNotice({ severity: 'warning', text: result.error })
+    }
+  }
+
   return (
     <Stack spacing={3}>
       <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2, alignItems: { xs: 'flex-start', md: 'center' }, flexDirection: { xs: 'column', md: 'row' } }}>
         <Box>
           <Typography component="h1" variant="h3" color="#344a34">纸帘台帐</Typography>
-          <Typography color="text.secondary" sx={{ mt: 0.75 }}>维护帘框尺寸、丝材与帘纹密度，并登记修补状态。</Typography>
+          <Typography color="text.secondary" sx={{ mt: 0.75 }}>维护帘框尺寸、丝材与帘纹密度；完成修补时填写修补日期与实测间距，合格才重新投入抄纸。</Typography>
         </Box>
         <Button variant="contained" size="large" onClick={() => setShowForm((current) => !current)} data-testid="new-mould">
           {showForm ? '收起登记' : '新建纸帘'}
@@ -188,7 +233,7 @@ export default function MouldLedger() {
       </Card>
 
       <TableContainer component={Card}>
-        <Table sx={{ minWidth: 920 }}>
+        <Table sx={{ minWidth: 1120 }}>
           <TableHead>
             <TableRow>
               <TableCell>帘号 / 尺寸</TableCell>
@@ -196,6 +241,7 @@ export default function MouldLedger() {
               <TableCell>间距 / 密度</TableCell>
               <TableCell>编帘匠人</TableCell>
               <TableCell>工序引用</TableCell>
+              <TableCell>最近修补</TableCell>
               <TableCell>状态</TableCell>
               <TableCell align="right">操作</TableCell>
             </TableRow>
@@ -223,30 +269,146 @@ export default function MouldLedger() {
                     <Typography variant="body2">{relatedRuns.length} 槽工序</Typography>
                     <Typography variant="caption" color="text.secondary">{latestRun ? `最近 ${latestRun.runDate}` : '尚无关联'}</Typography>
                   </TableCell>
+                  <TableCell sx={{ minWidth: 230 }}>
+                    {mould.lastRepair ? (
+                      <Stack spacing={0.5}>
+                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, flexWrap: 'wrap' }}>
+                          <Chip
+                            size="small"
+                            color={mould.lastRepair.passed ? 'success' : 'warning'}
+                            label={mould.lastRepair.passed ? '合格转在用' : '超差仍待修补'}
+                            data-testid={`repair-chip-${mould.id}`}
+                          />
+                          <Typography variant="caption" color="text.secondary">{mould.lastRepair.repairDate}</Typography>
+                        </Box>
+                        <Typography variant="caption" display="block">
+                          实测 {mould.lastRepair.measuredGap.toFixed(2)} mm · 原 {mould.lastRepair.standardGap.toFixed(2)} mm
+                          （{mould.lastRepair.deviation > 0 ? '+' : ''}{mould.lastRepair.deviation.toFixed(2)} mm）
+                        </Typography>
+                        {!mould.lastRepair.passed && mould.lastRepair.failReason && (
+                          <Typography variant="caption" color="warning.dark" display="block" data-testid={`repair-reason-${mould.id}`}>
+                            原因：{mould.lastRepair.failReason}
+                          </Typography>
+                        )}
+                      </Stack>
+                    ) : (
+                      <Typography variant="body2" color="text.secondary">尚无修补记录</Typography>
+                    )}
+                  </TableCell>
                   <TableCell>
                     <Chip size="small" color={mould.state === '在用' ? 'success' : mould.state === '待修补' ? 'warning' : 'default'} label={mould.state} />
                   </TableCell>
                   <TableCell align="right">
-                    <Button
-                      size="small"
-                      variant={mould.state === '待修补' ? 'contained' : 'outlined'}
-                      disabled={mould.state === '退役' || mould.id === undefined}
-                      onClick={() => {
-                        if (mould.id !== undefined) void setMouldState(mould.id, mould.state === '待修补' ? '在用' : '待修补')
-                      }}
-                    >
-                      {mould.state === '待修补' ? '完成修补' : '登记修补'}
-                    </Button>
+                    {mould.state === '待修补' ? (
+                      <Button
+                        size="small"
+                        variant="contained"
+                        disabled={mould.id === undefined}
+                        onClick={() => openRepairDialog(mould)}
+                        data-testid={`complete-repair-${mould.id}`}
+                      >
+                        完成修补
+                      </Button>
+                    ) : (
+                      <Button
+                        size="small"
+                        variant="outlined"
+                        disabled={mould.state === '退役' || mould.id === undefined}
+                        onClick={() => {
+                          if (mould.id !== undefined) void setMouldState(mould.id, '待修补')
+                        }}
+                      >
+                        登记修补
+                      </Button>
+                    )}
                   </TableCell>
                 </TableRow>
               )
             })}
             {filteredMoulds.length === 0 && (
-              <TableRow><TableCell colSpan={7} align="center" sx={{ py: 5 }}>没有符合筛选条件的纸帘</TableCell></TableRow>
+              <TableRow><TableCell colSpan={8} align="center" sx={{ py: 5 }}>没有符合筛选条件的纸帘</TableCell></TableRow>
             )}
           </TableBody>
         </Table>
       </TableContainer>
+
+      <Dialog
+        open={repairTarget !== null}
+        onClose={repairSaving ? undefined : () => setRepairTarget(null)}
+        fullWidth
+        maxWidth="sm"
+        data-testid="repair-dialog"
+      >
+        {repairTarget && (
+          <>
+            <DialogTitle>完成修补 · {repairTarget.mouldNo}</DialogTitle>
+            <DialogContent>
+              <Stack spacing={2} sx={{ mt: 0.5 }}>
+                <Alert severity="info" variant="outlined">
+                  原帘纹间距 {repairTarget.stripeGap.toFixed(2)} mm，实测值相差不超过 0.2 mm 才转为在用；超差则留在待修补并写明原因。
+                </Alert>
+                <TextField
+                  fullWidth
+                  type="date"
+                  label="修补日期"
+                  value={repairDate}
+                  onChange={(event) => setRepairDate(event.target.value)}
+                  InputLabelProps={{ shrink: true }}
+                  inputProps={{ 'data-testid': 'repair-date' }}
+                />
+                <RulerInput
+                  label="修补后实测间距"
+                  value={repairGap}
+                  onChange={setRepairGap}
+                  min={0.1}
+                  max={5}
+                  step={0.01}
+                  testId="repair-gap"
+                  helperText={
+                    <Typography component="span" variant="caption" color={repairExceeded ? 'warning.dark' : 'success.dark'}>
+                      {repairExceeded ? '超差：' : '合格：'}{getGapConclusion(repairDeviation)}
+                      （{repairDeviation > 0 ? '+' : ''}{repairDeviation.toFixed(2)} mm，允许 ±0.2 mm）
+                    </Typography>
+                  }
+                />
+                <TextField
+                  fullWidth
+                  multiline
+                  minRows={2}
+                  label="超差原因（超差时必填，合格时可不填）"
+                  value={repairReason}
+                  onChange={(event) => setRepairReason(event.target.value)}
+                  error={repairExceeded && !repairReason.trim()}
+                  helperText={repairExceeded && !repairReason.trim() ? '实测间距超差，必须写明留在待修补的原因' : repairTarget.lastRepair?.failReason ? `上次原因：${repairTarget.lastRepair.failReason}` : ' '}
+                  inputProps={{ 'data-testid': 'repair-reason-input' }}
+                />
+              </Stack>
+            </DialogContent>
+            <DialogActions sx={{ px: 3, pb: 2.5 }}>
+              <Button onClick={() => setRepairTarget(null)} disabled={repairSaving}>取消</Button>
+              <Button
+                variant="contained"
+                color={repairExceeded ? 'warning' : 'primary'}
+                onClick={handleRepairSubmit}
+                disabled={repairSaving || !repairDate || !(repairGap > 0) || repairBlocked}
+                data-testid="repair-submit"
+              >
+                {repairExceeded ? '超差，留在待修补' : '合格，转为在用'}
+              </Button>
+            </DialogActions>
+          </>
+        )}
+      </Dialog>
+
+      <Snackbar
+        open={notice !== null}
+        autoHideDuration={4200}
+        onClose={() => setNotice(null)}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+      >
+        {notice ? <Alert severity={notice.severity} onClose={() => setNotice(null)} variant="filled" data-testid="repair-notice">{notice.text}</Alert> : <span />}
+      </Snackbar>
+
     </Stack>
   )
 }

@@ -64,6 +64,7 @@ export default function RunBoard() {
 
   const mouldById = useMemo(() => new Map(moulds.map((mould) => [mould.id, mould])), [moulds])
   const batchById = useMemo(() => new Map(batches.map((batch) => [batch.id, batch])), [batches])
+  const activeMoulds = useMemo(() => moulds.filter((mould) => mould.state === '在用'), [moulds])
   const filteredRuns = useMemo(
     () => runs.filter((run) => {
       const mould = mouldById.get(run.mouldId)
@@ -73,7 +74,8 @@ export default function RunBoard() {
     }),
     [dateFilter, mouldById, mouldFilter, runs],
   )
-  const selectedMould = mouldById.get(form.mouldId) ?? moulds[0]
+  // 只有在用纸帘才能进入新工序
+  const selectedMould = mouldById.get(form.mouldId)?.state === '在用' ? mouldById.get(form.mouldId) : undefined
   const formDeviation = calculateDeviation(form.measuredGap, selectedMould?.stripeGap ?? form.measuredGap)
   const latestRun = runs[0]
 
@@ -90,7 +92,7 @@ export default function RunBoard() {
   }
 
   const handleSubmit = async () => {
-    if (!form.runNo.trim() || !form.operator.trim() || form.measuredGap <= 0 || form.grammage <= 0) return
+    if (!selectedMould || !form.runNo.trim() || !form.operator.trim() || form.measuredGap <= 0 || form.grammage <= 0) return
     setSubmitting(true)
     const created = await addRun({ ...form, runNo: form.runNo.trim(), operator: form.operator.trim(), deviation: formDeviation })
     setSubmitting(false)
@@ -126,9 +128,18 @@ export default function RunBoard() {
             <Grid container spacing={2}>
               <Grid item xs={12} md={3}><TextField fullWidth label="工序编号" value={form.runNo} onChange={(event) => updateForm('runNo', event.target.value)} inputProps={{ 'data-testid': 'field-runNo' }} /></Grid>
               <Grid item xs={6} md={2.5}>
-                <TextField select fullWidth label="纸帘" value={form.mouldId} onChange={(event) => handleMouldChange(Number(event.target.value))} SelectProps={{ native: true, inputProps: { 'data-testid': 'field-mouldId' } }}>
-                  {!moulds.some((mould) => mould.id === form.mouldId) && <option value={form.mouldId}>纸帘数据载入中</option>}
-                  {moulds.filter((mould) => mould.state !== '退役').map((mould) => <option key={mould.id} value={mould.id}>{mould.mouldNo} · {mould.stripeGap} mm</option>)}
+                <TextField
+                  select
+                  fullWidth
+                  label="纸帘（仅在用）"
+                  value={form.mouldId}
+                  onChange={(event) => handleMouldChange(Number(event.target.value))}
+                  SelectProps={{ native: true, inputProps: { 'data-testid': 'field-mouldId' } }}
+                  helperText={selectedMould ? ' ' : '只有在用纸帘能登记新工序，待修补纸帘请先完成修补并复测合格'}
+                  error={!selectedMould}
+                >
+                  {!selectedMould && <option value={form.mouldId}>无在用纸帘可选</option>}
+                  {activeMoulds.map((mould) => <option key={mould.id} value={mould.id}>{mould.mouldNo} · {mould.stripeGap} mm</option>)}
                 </TextField>
               </Grid>
               <Grid item xs={6} md={2.5}>
@@ -158,7 +169,7 @@ export default function RunBoard() {
             </Grid>
             <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: 1.5, mt: 2.5 }}>
               <Button onClick={() => setShowForm(false)}>取消</Button>
-              <Button variant="contained" onClick={handleSubmit} disabled={submitting} data-testid="submit-run">保存工序</Button>
+              <Button variant="contained" onClick={handleSubmit} disabled={submitting || !selectedMould} data-testid="submit-run">保存工序</Button>
             </Box>
           </CardContent>
         </Card>
