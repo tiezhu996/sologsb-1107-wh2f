@@ -31,7 +31,7 @@ export const useSampleStore = create<SampleStore>((set, get) => ({
     try {
       const payload = plain(input)
       const id = Number(await db.paperSamples.add(payload))
-      const created: PaperSample = { ...payload, id, schemaRev: 2 }
+      const created: PaperSample = { ...payload, id, schemaRev: 3 }
       set((state) => ({ paperSamples: [created, ...state.paperSamples] }))
       return created
     } catch {
